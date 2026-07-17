@@ -1,5 +1,3 @@
-version: "3.9"
-
 # IMPORTANT: Change all default passwords before deploying to any non-local environment.
 # Set environment variables (POSTGRES_PASSWORD, MONGO_PASSWORD, REDIS_PASSWORD)
 # or use a secrets manager. The defaults below are for local development only.
@@ -42,13 +40,13 @@ services:
   redis:
     image: redis:7.2-alpine
     container_name: oms_redis
-    command: redis-server --requirepass oms_pass
+    command: redis-server --requirepass ${REDIS_PASSWORD:-oms_pass}
     ports:
       - "6380:6379"
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "oms_pass", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-oms_pass}", "ping"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -79,12 +77,12 @@ services:
     restart: unless-stopped
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     environment:
-      - DATABASE_URL=postgresql+asyncpg://oms_user:oms_pass@postgres:5432/oms_db
-      - MONGODB_URL=mongodb://oms_user:oms_pass@mongodb:27017/oms_events?authSource=admin
-      - REDIS_URL=redis://:oms_pass@redis:6379/0
+      - DATABASE_URL=postgresql+asyncpg://oms_user:${POSTGRES_PASSWORD:-oms_pass}@postgres:5432/oms_db
+      - MONGODB_URL=mongodb://oms_user:${MONGO_PASSWORD:-oms_pass}@mongodb:27017/oms_events?authSource=admin
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-oms_pass}@redis:6379/0
       - ELASTICSEARCH_URL=http://elasticsearch:9200
-      - CELERY_BROKER_URL=redis://:oms_pass@redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://:oms_pass@redis:6379/2
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-oms_pass}@redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-oms_pass}@redis:6379/2
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
     ports:
       - "8001:8000"
@@ -108,13 +106,13 @@ services:
     restart: unless-stopped
     command: celery -A app.workers.celery_app worker --loglevel=info -Q sourcing,fulfillment,carrier,notifications,webhooks,connectors --concurrency=4
     environment:
-      - DATABASE_URL=postgresql+asyncpg://oms_user:oms_pass@postgres:5432/oms_db
-      - SYNC_DATABASE_URL=postgresql+psycopg2://oms_user:oms_pass@postgres:5432/oms_db
-      - MONGODB_URL=mongodb://oms_user:oms_pass@mongodb:27017/oms_events?authSource=admin
-      - REDIS_URL=redis://:oms_pass@redis:6379/0
+      - DATABASE_URL=postgresql+asyncpg://oms_user:${POSTGRES_PASSWORD:-oms_pass}@postgres:5432/oms_db
+      - SYNC_DATABASE_URL=postgresql+psycopg2://oms_user:${POSTGRES_PASSWORD:-oms_pass}@postgres:5432/oms_db
+      - MONGODB_URL=mongodb://oms_user:${MONGO_PASSWORD:-oms_pass}@mongodb:27017/oms_events?authSource=admin
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-oms_pass}@redis:6379/0
       - ELASTICSEARCH_URL=http://elasticsearch:9200
-      - CELERY_BROKER_URL=redis://:oms_pass@redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://:oms_pass@redis:6379/2
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-oms_pass}@redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-oms_pass}@redis:6379/2
     volumes:
       - .:/app
     depends_on:
@@ -131,13 +129,13 @@ services:
     restart: unless-stopped
     command: celery -A app.workers.celery_app beat --loglevel=info
     environment:
-      - DATABASE_URL=postgresql+asyncpg://oms_user:oms_pass@postgres:5432/oms_db
-      - SYNC_DATABASE_URL=postgresql+psycopg2://oms_user:oms_pass@postgres:5432/oms_db
-      - MONGODB_URL=mongodb://oms_user:oms_pass@mongodb:27017/oms_events?authSource=admin
-      - REDIS_URL=redis://:oms_pass@redis:6379/0
+      - DATABASE_URL=postgresql+asyncpg://oms_user:${POSTGRES_PASSWORD:-oms_pass}@postgres:5432/oms_db
+      - SYNC_DATABASE_URL=postgresql+psycopg2://oms_user:${POSTGRES_PASSWORD:-oms_pass}@postgres:5432/oms_db
+      - MONGODB_URL=mongodb://oms_user:${MONGO_PASSWORD:-oms_pass}@mongodb:27017/oms_events?authSource=admin
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-oms_pass}@redis:6379/0
       - ELASTICSEARCH_URL=http://elasticsearch:9200
-      - CELERY_BROKER_URL=redis://:oms_pass@redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://:oms_pass@redis:6379/2
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-oms_pass}@redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-oms_pass}@redis:6379/2
     volumes:
       - .:/app
     depends_on:
@@ -153,8 +151,8 @@ services:
       celery -A app.workers.celery_app flower --port=5555
       --basic_auth=${FLOWER_USER:-admin}:${FLOWER_PASSWORD:?FLOWER_PASSWORD must be set}
     environment:
-      - CELERY_BROKER_URL=redis://:oms_pass@redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://:oms_pass@redis:6379/2
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-oms_pass}@redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-oms_pass}@redis:6379/2
       - FLOWER_USER=${FLOWER_USER:-admin}
       - FLOWER_PASSWORD=${FLOWER_PASSWORD:?FLOWER_PASSWORD must be set}
     ports:

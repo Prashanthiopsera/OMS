@@ -103,3 +103,17 @@ jobs:
 
       - name: Run ruff
         run: ruff check app/ --select E,F,W --ignore E501,E402,E712,E722,E741,F401,F541,F811,F841,W291,W292,W293,E401,E701
+
+  credential-scan:
+    name: Docker Compose credential scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Scan docker-compose files for plaintext credentials
+        run: python scripts/scan_compose_credentials.py
