@@ -44,10 +44,27 @@ async def login(request: Request, response: Response, payload: LoginRequest, db:
 
     # Transparent re-hash: if the stored hash used a legacy algorithm
     # (bcrypt), upgrade it to Argon2id now that we know the plaintext.
+    # Best-effort: a failure here must never block an otherwise-successful
+    # login — the user simply gets re-hashed on a future login instead.
     if upgraded_hash is not None:
-        user.hashed_password = upgraded_hash
-        await db.commit()
-        logger.info(f"Upgraded password hash to Argon2id for {user.email}")
+        old_algorithm = "bcrypt" if user.hashed_password.startswith("$2") else "unknown"
+        try:
+            user.hashed_password = upgraded_hash
+            await db.commit()
+            logger.info(
+                "Password hash upgraded on login",
+                extra={
+                    "user_id": str(user.id),
+                    "old_algorithm": old_algorithm,
+                    "new_algorithm": "argon2id",
+                },
+            )
+        except Exception:
+            logger.exception(
+                "Password hash upgrade failed (non-fatal, login proceeds)",
+                extra={"user_id": str(user.id), "old_algorithm": old_algorithm},
+            )
+            await db.rollback()
 
     if not user.is_active:
         raise HTTPException(
