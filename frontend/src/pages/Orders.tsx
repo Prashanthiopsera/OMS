@@ -36,7 +36,7 @@ function SkuSearchInput({
   const [open, setOpen] = useState(false)
   const [debouncedQuery, setDebouncedQuery] = useState('')
   const containerRef = useRef<HTMLDivElement>(null)
-  const timerRef = useRef<ReturnType<typeof setTimeout>>()
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   // Sync query when external value changes (e.g. on clear)
   useEffect(() => { setQuery(value.sku || '') }, [value.sku])
@@ -163,7 +163,7 @@ export default function Orders() {
   const [channel, setChannel] = useState('')
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
-  const searchTimerRef = useRef<ReturnType<typeof setTimeout>>()
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const [brandId, setBrandId] = useState('')
   const [showCreate, setShowCreate] = useState(false)
   const [form, setForm] = useState<NewOrderForm>(defaultForm)

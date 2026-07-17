@@ -22,7 +22,7 @@ export default function Inventory() {
   // Row state
   const [expandedSku, setExpandedSku] = useState<string | null>(null)
 
-  const searchTimerRef = useRef<ReturnType<typeof setTimeout>>()
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   // Adjust modal
   const [adjustItem, setAdjustItem] = useState<InventoryItem | null>(null)

@@ -12,6 +12,7 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
 from app.database.postgres import Base
+from app.models.postgres.enums import PaymentTerms
 
 
 class AccountType(str, enum.Enum):
@@ -29,14 +30,6 @@ class PricingTier(str, enum.Enum):
     PLATINUM = "PLATINUM"
 
 
-class PaymentTerms(str, enum.Enum):
-    PREPAID = "PREPAID"
-    NET_15 = "NET_15"
-    NET_30 = "NET_30"
-    NET_60 = "NET_60"
-    NET_90 = "NET_90"
-    COD = "COD"
-    UPON_RECEIPT = "UPON_RECEIPT"
 
 
 class ContactRole(str, enum.Enum):

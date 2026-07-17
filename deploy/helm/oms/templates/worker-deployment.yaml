@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "oms.fullname" . }}-worker-sourcing
+  labels:
+    app.kubernetes.io/name: {{ include "oms.name" . }}
+    app.kubernetes.io/component: worker-sourcing
+spec:
+  replicas: {{ .Values.workers.sourcing.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "oms.name" . }}
+      app.kubernetes.io/component: worker-sourcing
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "oms.name" . }}
+        app.kubernetes.io/component: worker-sourcing
+    spec:
+      containers:
+        - name: worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["celery", "-A", "app.workers.celery_app", "worker", "-Q", "sourcing", "-l", "info"]
+          env:
+            - name: DATABASE_URL
+              value: {{ .Values.env.DATABASE_URL | quote }}
+            - name: REDIS_URL
+              value: {{ .Values.env.REDIS_URL | quote }}
+            - name: CELERY_BROKER_URL
+              value: {{ .Values.env.CELERY_BROKER_URL | quote }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "oms.fullname" . }}-worker-agents
+  labels:
+    app.kubernetes.io/name: {{ include "oms.name" . }}
+    app.kubernetes.io/component: worker-agents
+spec:
+  replicas: {{ .Values.workers.agents.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "oms.name" . }}
+      app.kubernetes.io/component: worker-agents
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "oms.name" . }}
+        app.kubernetes.io/component: worker-agents
+    spec:
+      containers:
+        - name: worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["celery", "-A", "app.workers.celery_app", "worker", "-Q", "agents", "-l", "info"]
+          env:
+            - name: DATABASE_URL
+              value: {{ .Values.env.DATABASE_URL | quote }}
+            - name: REDIS_URL
+              value: {{ .Values.env.REDIS_URL | quote }}
+            - name: CELERY_BROKER_URL
+              value: {{ .Values.env.CELERY_BROKER_URL | quote }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

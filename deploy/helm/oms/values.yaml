@@ -12,6 +12,7 @@ service:
 ingress:
   enabled: false
   className: nginx
+  annotations: {}
   hosts:
     - host: oms.local
       paths:
@@ -46,5 +47,6 @@ probes:
     initialDelaySeconds: 10
 
 slo:
+  enabled: true
   availabilityTarget: 99.9
   latencyP99Ms: 500

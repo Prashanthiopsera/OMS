@@ -14,6 +14,7 @@ from sqlalchemy.sql import func
 import enum
 
 from app.database.postgres import Base
+from app.models.postgres.enums import PaymentTerms
 
 
 class OrderChannel(str, enum.Enum):
@@ -32,16 +33,6 @@ class OrderType(str, enum.Enum):
     WHOLESALE = "WHOLESALE"
     B2B = "B2B"
     INTERNAL = "INTERNAL"
-
-
-class PaymentTerms(str, enum.Enum):
-    PREPAID = "PREPAID"
-    NET_15 = "NET_15"
-    NET_30 = "NET_30"
-    NET_60 = "NET_60"
-    NET_90 = "NET_90"
-    COD = "COD"
-    UPON_RECEIPT = "UPON_RECEIPT"
 
 
 class ApprovalStatus(str, enum.Enum):
