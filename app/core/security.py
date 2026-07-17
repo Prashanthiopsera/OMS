@@ -3,8 +3,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import bcrypt as _bcrypt
+import jwt
 from fastapi import HTTPException, status
-from jose import JWTError, jwt
 
 from app.config import settings
 
@@ -78,7 +78,7 @@ def verify_token(token: str) -> dict[str, Any]:
                 detail="Invalid token",
             )
         return payload
-    except JWTError:
+    except jwt.PyJWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",

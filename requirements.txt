@@ -36,7 +36,7 @@ httpx==0.27.0
 aiohttp==3.9.5
 
 # Utilities
-python-jose[cryptography]==3.3.0
+pyjwt[crypto]==2.10.1
 passlib[bcrypt]==1.7.4
 python-dotenv==1.0.1
 orjson==3.10.3
