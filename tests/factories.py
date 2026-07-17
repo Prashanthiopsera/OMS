@@ -23,11 +23,22 @@ from app.models.postgres import (  # noqa: F401
     user_brand_role_models,
 )
 
+import hashlib
+import secrets
+
 from app.core.security import hash_password
+from app.models.postgres.api_key_models import ApiKey
 from app.models.postgres.auth_models import User
 from app.models.postgres.brand_models import Brand, BrandTenantMode, InventoryMode
 from app.models.postgres.inventory_models import InventoryItem
 from app.models.postgres.node_models import FulfillmentNode, NodeStatus, NodeType
+from app.models.postgres.org_models import (
+    Environment,
+    EnvironmentStatus,
+    EnvironmentType,
+    Organization,
+)
+from app.models.postgres.user_brand_role_models import UserBrandRole
 from app.models.postgres.order_models import (
     FulfillmentType,
     Order,
@@ -110,6 +121,58 @@ def make_order_item(**overrides: Any) -> OrderItem:
     }
     defaults.update(overrides)
     return OrderItem(**defaults)
+
+
+def make_organization(**overrides: Any) -> Organization:
+    slug = overrides.pop("slug", f"org-{uuid.uuid4().hex[:6]}")
+    defaults: dict[str, Any] = {
+        "slug": slug,
+        "name": "Test Organization",
+        "is_active": True,
+    }
+    defaults.update(overrides)
+    return Organization(**defaults)
+
+
+def make_environment(**overrides: Any) -> Environment:
+    slug = overrides.pop("slug", f"env-{uuid.uuid4().hex[:6]}")
+    db_name = overrides.pop("db_name", f"oms_test_{uuid.uuid4().hex[:8]}")
+    defaults: dict[str, Any] = {
+        "name": "Test Environment",
+        "slug": slug,
+        "env_type": EnvironmentType.DEV,
+        "status": EnvironmentStatus.ACTIVE,
+        "db_name": db_name,
+        "mongo_events_db": f"{db_name}_events",
+        "mongo_ai_db": f"{db_name}_ai",
+        "es_index_prefix": db_name,
+        "is_default": False,
+    }
+    defaults.update(overrides)
+    return Environment(**defaults)
+
+
+def make_user_brand_role(**overrides: Any) -> UserBrandRole:
+    defaults: dict[str, Any] = {
+        "role": "OPERATOR",
+    }
+    defaults.update(overrides)
+    return UserBrandRole(**defaults)
+
+
+def make_api_key(**overrides: Any) -> tuple[ApiKey, str]:
+    """Return (ApiKey model, raw_key) — raw key is only available at creation time."""
+    raw_key = overrides.pop("raw_key", f"kr_{secrets.token_urlsafe(32)}")
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    defaults: dict[str, Any] = {
+        "key_prefix": raw_key[:12],
+        "key_hash": key_hash,
+        "name": "Test API Key",
+        "scopes": ["orders:read"],
+        "is_active": True,
+    }
+    defaults.update(overrides)
+    return ApiKey(**defaults), raw_key
 
 
 def make_order(**overrides: Any) -> Order:
