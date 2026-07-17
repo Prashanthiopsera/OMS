@@ -579,7 +579,7 @@ async def root():
 # Routers
 # ---------------------------------------------------------------------------
 
-from app.routers import orders, inventory, sourcing_rules, nodes, search, analytics, webhooks, ai, connectors
+from app.routers import orders, inventory, sourcing_rules, nodes, search, analytics, webhooks, ai, connectors, agents
 from app.routers import auth, admin, monitoring, performance, testing, architect, ops
 from app.routers import organizations, environments, lifecycles
 from app.routers import api_keys as api_keys_module
@@ -608,6 +608,7 @@ app.include_router(search.router)
 app.include_router(analytics.router)
 app.include_router(webhooks.router)
 app.include_router(ai.router)
+app.include_router(agents.router)
 app.include_router(connectors.router)
 app.include_router(monitoring.router)
 app.include_router(ops.router)

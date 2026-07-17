@@ -1,0 +1,50 @@
+replicaCount: 2
+
+image:
+  repository: kuberiva/oms
+  tag: "0.2.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8000
+
+ingress:
+  enabled: false
+  className: nginx
+  hosts:
+    - host: oms.local
+      paths:
+        - path: /
+          pathType: Prefix
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+env:
+  DATABASE_URL: ""
+  REDIS_URL: ""
+  CELERY_BROKER_URL: ""
+
+workers:
+  sourcing:
+    replicas: 1
+  agents:
+    replicas: 1
+
+probes:
+  liveness:
+    path: /health
+    initialDelaySeconds: 30
+  readiness:
+    path: /health
+    initialDelaySeconds: 10
+
+slo:
+  availabilityTarget: 99.9
+  latencyP99Ms: 500

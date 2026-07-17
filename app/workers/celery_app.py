@@ -17,6 +17,7 @@ celery_app = Celery(
         "app.workers.inventory_sync",
         "app.workers.learning",
         "app.workers.sla",
+        "app.workers.agents",
     ],
 )
 
@@ -59,6 +60,10 @@ celery_app.conf.update(
             "exchange": "learning",
             "routing_key": "learning",
         },
+        "agents": {
+            "exchange": "agents",
+            "routing_key": "agents",
+        },
     },
 
     # Task routing
@@ -71,6 +76,7 @@ celery_app.conf.update(
         "app.workers.connectors.*": {"queue": "connectors"},
         "app.workers.inventory_sync.*": {"queue": "connectors"},
         "app.workers.learning.*": {"queue": "learning"},
+        "app.workers.agents.*": {"queue": "agents"},
     },
 
     # Retry config

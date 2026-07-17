@@ -38,216 +38,26 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
 
 
-# ─── Tool Definitions ─────────────────────────────────────────────────────────
+# ─── Tool Definitions (from registry) ───────────────────────────────────────
 
-TOOLS = [
-    {
-        "name": "search_orders",
-        "description": (
-            "Search and filter orders from the OMS database. "
-            "Returns order details including status, customer, items, amounts, timestamps. "
-            "Use this to find orders by status, channel, customer, date range, or general search."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "status": {"type": "string", "description": "Filter by order status (e.g. PENDING, SHIPPED, DELIVERED)"},
-                "channel": {"type": "string", "description": "Filter by channel (WEB, MOBILE, POS, API, MARKETPLACE)"},
-                "customer_email": {"type": "string", "description": "Filter by customer email (partial match)"},
-                "start_date": {"type": "string", "description": "Filter orders created on or after this date (ISO 8601, e.g. 2026-03-20 or 2026-03-20T00:00:00). Use today's date for 'today' queries."},
-                "end_date": {"type": "string", "description": "Filter orders created on or before this date (ISO 8601, e.g. 2026-03-20T23:59:59). Use today's date for 'today' queries."},
-                "limit": {"type": "integer", "description": "Number of orders to return (default 10, max 50)"},
-                "order_by": {"type": "string", "description": "Sort field: created_at, total_amount (default: created_at desc)"},
-            },
-        },
-    },
-    {
-        "name": "get_order_details",
-        "description": "Get full details of a specific order by ID or order number, including line items, allocations, and shipments.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "order_id": {"type": "string", "description": "The order UUID or order number (e.g. ORD-20240101-ABCDE)"},
-            },
-            "required": ["order_id"],
-        },
-    },
-    {
-        "name": "get_inventory_status",
-        "description": "Get current inventory levels across all nodes. Can filter by SKU or node. Identifies low stock and out-of-stock items.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "sku": {"type": "string", "description": "Filter by SKU (partial match)"},
-                "node_id": {"type": "string", "description": "Filter by node UUID"},
-                "low_stock_only": {"type": "boolean", "description": "Return only items below reorder point"},
-                "limit": {"type": "integer", "description": "Max items to return (default 20)"},
-            },
-        },
-    },
-    {
-        "name": "get_analytics_summary",
-        "description": "Get OMS analytics: order counts by status/channel, revenue, top nodes, inventory alerts.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "days": {"type": "integer", "description": "Lookback period in days (default 30)"},
-            },
-        },
-    },
-    {
-        "name": "get_sourcing_rules",
-        "description": "Get all sourcing rules with their priorities, strategies, and conditions. Useful for analyzing sourcing configuration.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "active_only": {"type": "boolean", "description": "Return only active rules (default true)"},
-            },
-        },
-    },
-    {
-        "name": "get_nodes",
-        "description": "Get fulfillment nodes (warehouses, stores, dark stores) with their capacity and utilization.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "node_type": {"type": "string", "description": "Filter by type: WAREHOUSE, STORE, DARK_STORE"},
-                "active_only": {"type": "boolean", "description": "Return only active nodes"},
-            },
-        },
-    },
-    {
-        "name": "get_top_selling_items",
-        "description": (
-            "Get the best-selling / top-selling products ranked by units sold or revenue. "
-            "Use this whenever the user asks about best sellers, top products, most popular items, "
-            "top SKUs, or which products sell the most. Returns SKU, product name, total units sold, "
-            "and total revenue, ranked from highest to lowest."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "limit": {"type": "integer", "description": "Number of top items to return (default 10, max 50)"},
-                "days": {"type": "integer", "description": "Lookback period in days (default 30, 0 = all time)"},
-                "rank_by": {"type": "string", "description": "Rank by 'quantity' (units sold) or 'revenue' (default: quantity)"},
-            },
-        },
-    },
-    {
-        "name": "aggregate_orders",
-        "description": (
-            "Flexible aggregation query for any cross-dimensional analysis of orders. "
-            "Use this for: top customers, revenue/orders by channel, daily/weekly/monthly trends, "
-            "which fulfillment nodes handle the most orders, slowest-moving products, "
-            "order value distributions, or any question requiring grouping and counting. "
-            "Returns rows with a label, primary value, and secondary value for each group."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "group_by": {
-                    "type": "string",
-                    "description": (
-                        "Dimension to group by. Options: "
-                        "'sku' (product performance), "
-                        "'customer' (top/bottom customers), "
-                        "'channel' (WEB/MOBILE/POS/API/MARKETPLACE breakdown), "
-                        "'status' (order status breakdown), "
-                        "'node' (fulfillment node performance), "
-                        "'day' (daily trend), "
-                        "'week' (weekly trend), "
-                        "'month' (monthly trend)"
-                    ),
-                },
-                "metric": {
-                    "type": "string",
-                    "description": "What to measure: 'order_count' (default), 'revenue', 'quantity' (units sold, only for group_by=sku)",
-                },
-                "sort_order": {
-                    "type": "string",
-                    "description": "'desc' for highest first (default), 'asc' for lowest first (use for slow-movers, least active customers, etc.)",
-                },
-                "days": {"type": "integer", "description": "Lookback period in days (default 30, 0 = all time)"},
-                "limit": {"type": "integer", "description": "Max rows to return (default 10, max 50)"},
-                "filter_status": {"type": "string", "description": "Optional: filter to a specific order status before aggregating"},
-                "filter_channel": {"type": "string", "description": "Optional: filter to a specific channel before aggregating"},
-            },
-            "required": ["group_by"],
-        },
-    },
-    {
-        "name": "get_brands",
-        "description": "Get all brands configured in the system with their mode (B2C/B2B/HYBRID) and operational config.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "active_only": {"type": "boolean", "description": "Return only active brands (default true)"},
-            },
-        },
-    },
-    {
-        "name": "get_b2b_accounts",
-        "description": (
-            "Get B2B customer accounts with credit limits, balance, and order history. "
-            "Use for: credit utilization questions, top B2B customers, accounts near limit, payment terms analysis."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "search": {"type": "string", "description": "Search by company name or account number"},
-                "brand_id": {"type": "string", "description": "Filter by brand UUID"},
-                "limit": {"type": "integer", "description": "Max accounts to return (default 20)"},
-            },
-        },
-    },
-    {
-        "name": "get_returns",
-        "description": (
-            "Get return/RMA records with status, reason, and refund information. "
-            "Use for: return rate analysis, pending returns, returns by status, RMA lookup."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "status": {"type": "string", "description": "Filter by return status (REQUESTED, APPROVED, IN_TRANSIT, RECEIVED, RESTOCKED, COMPLETED, REJECTED)"},
-                "order_id": {"type": "string", "description": "Filter returns for a specific order UUID or order number"},
-                "days": {"type": "integer", "description": "Lookback period in days (default 30, 0 = all time)"},
-                "limit": {"type": "integer", "description": "Max returns to return (default 20)"},
-            },
-        },
-    },
-]
+def _load_tools():
+    import app.agents  # noqa: F401
+    from app.agents.registry import tool_schemas
+    return tool_schemas(include_write=False)
+
+
+TOOLS = _load_tools()
 
 
 # ─── Tool Execution ───────────────────────────────────────────────────────────
 
 async def execute_tool(tool_name: str, tool_input: dict) -> dict:
     """Execute a tool and return structured data."""
+    import app.agents  # noqa: F401 — ensure tools registered
+    from app.agents.registry import execute_tool as registry_execute
+
     async with async_session_factory() as db:
-        if tool_name == "search_orders":
-            return await _search_orders(db, tool_input)
-        elif tool_name == "get_order_details":
-            return await _get_order_details(db, tool_input)
-        elif tool_name == "get_inventory_status":
-            return await _get_inventory_status(db, tool_input)
-        elif tool_name == "get_analytics_summary":
-            return await _get_analytics_summary(db, tool_input)
-        elif tool_name == "get_sourcing_rules":
-            return await _get_sourcing_rules(db, tool_input)
-        elif tool_name == "get_nodes":
-            return await _get_nodes(db, tool_input)
-        elif tool_name == "get_top_selling_items":
-            return await _get_top_selling_items(db, tool_input)
-        elif tool_name == "aggregate_orders":
-            return await _aggregate_orders(db, tool_input)
-        elif tool_name == "get_brands":
-            return await _get_brands(db, tool_input)
-        elif tool_name == "get_b2b_accounts":
-            return await _get_b2b_accounts(db, tool_input)
-        elif tool_name == "get_returns":
-            return await _get_returns(db, tool_input)
-        else:
-            return {"error": f"Unknown tool: {tool_name}"}
+        return await registry_execute(tool_name, tool_input, db=db)
 
 
 async def _search_orders(db, inp: dict) -> dict:
