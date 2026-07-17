@@ -28,6 +28,9 @@ from app.schemas.returns import (
     ReturnResponse,
     ReturnUpdate,
 )
+from app.services.error_mapping import http_exception_from_domain
+from app.services.exceptions import DomainError
+from app.services.return_service import ReturnService, generate_rma_number, generate_refund_number
 
 router = APIRouter(
     prefix="/returns",
@@ -43,15 +46,11 @@ order_refunds_router = APIRouter(tags=["Returns"])
 # ---------------------------------------------------------------------------
 
 def _generate_rma_number() -> str:
-    month_str = datetime.now(tz=timezone.utc).strftime("%Y%m")
-    suffix = secrets.token_hex(3).upper()  # 6 hex chars
-    return f"RMA-{month_str}-{suffix}"
+    return generate_rma_number()
 
 
 def _generate_refund_number() -> str:
-    month_str = datetime.now(tz=timezone.utc).strftime("%Y%m")
-    suffix = secrets.token_hex(3).upper()  # 6 hex chars
-    return f"REF-{month_str}-{suffix}"
+    return generate_refund_number()
 
 
 async def _log_order_event(order_id: str, event_type: str, data: dict):
@@ -203,67 +202,23 @@ async def create_return(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new return request (RMA). Validates that the order exists."""
-    from app.models.postgres.order_models import OrderStatus
-    order = await db.get(Order, payload.order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    if order.status in (OrderStatus.CANCELLED, OrderStatus.PENDING):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Returns cannot be created for orders in {order.status.value} status",
-        )
+    service = ReturnService(db)
+    try:
+        order_return = await service.create_return(payload)
+    except DomainError as exc:
+        raise http_exception_from_domain(exc) from exc
 
-    # Generate unique RMA number (collision-safe)
-    rma_number = None
-    for _ in range(5):
-        candidate = _generate_rma_number()
-        clash = await db.execute(
-            select(OrderReturn).where(OrderReturn.return_number == candidate)
-        )
-        if not clash.scalar_one_or_none():
-            rma_number = candidate
-            break
-    if not rma_number:
-        raise HTTPException(status_code=500, detail="Could not generate unique RMA number")
-
-    order_return = OrderReturn(
-        return_number=rma_number,
-        order_id=payload.order_id,
-        status=ReturnStatus.REQUESTED,
-        reason=payload.reason,
-        customer_notes=payload.customer_notes,
-    )
-    db.add(order_return)
-    await db.flush()  # Populate order_return.id before inserting items
-
-    for item_payload in payload.items:
-        item = ReturnItem(
-            return_id=order_return.id,
-            order_item_id=item_payload.order_item_id,
-            sku=item_payload.sku,
-            description=item_payload.description,
-            quantity_requested=item_payload.quantity_requested,
-            restock=item_payload.restock,
-        )
-        db.add(item)
-
-    await db.flush()
-
-    # Audit event
     await _log_order_event(
         str(payload.order_id),
         "order.return_requested",
         {
             "return_id": str(order_return.id),
-            "return_number": rma_number,
+            "return_number": order_return.return_number,
             "reason": payload.reason.value,
             "item_count": len(payload.items),
         },
     )
-
-    # Reload with relationships
-    reloaded = await _load_return(db, order_return.id)
-    return _return_response(reloaded)
+    return _return_response(order_return)
 
 
 @router.get("/", response_model=ReturnListResponse)
@@ -278,29 +233,15 @@ async def list_returns(
     _user=Depends(get_current_user),
 ):
     """List returns with optional filters."""
-    stmt = select(OrderReturn)
-    if status:
-        stmt = stmt.where(OrderReturn.status == status)
-    if order_id:
-        stmt = stmt.where(OrderReturn.order_id == order_id)
-    if from_date:
-        stmt = stmt.where(OrderReturn.created_at >= from_date)
-    if to_date:
-        stmt = stmt.where(OrderReturn.created_at <= to_date)
-
-    total = (
-        await db.execute(select(func.count()).select_from(stmt.subquery()))
-    ).scalar_one()
-
-    stmt = (
-        stmt
-        .options(selectinload(OrderReturn.items), selectinload(OrderReturn.refund))
-        .order_by(OrderReturn.created_at.desc())
-        .offset(skip)
-        .limit(limit)
+    service = ReturnService(db)
+    returns, total = await service.list_returns(
+        status=status,
+        order_id=order_id,
+        from_date=from_date,
+        to_date=to_date,
+        skip=skip,
+        limit=limit,
     )
-    returns = (await db.execute(stmt)).scalars().all()
-
     return ReturnListResponse(
         items=[_return_response(r) for r in returns],
         total=total,
@@ -314,7 +255,7 @@ async def get_return(
     _user=Depends(get_current_user),
 ):
     """Get a single return with items and refund detail."""
-    order_return = await _load_return(db, return_id)
+    order_return = await ReturnService(db).load_return(return_id)
     return _return_response(order_return)
 
 
@@ -331,37 +272,17 @@ async def update_return_status(
     - RESTOCKED: sets restocked_at; creates inventory RETURNED adjustments
       for all items with restock=True.
     """
-    order_return = await _load_return(db, return_id)
+    service = ReturnService(db)
+    try:
+        order_return, restocked_skus = await service.update_status(return_id, payload)
+    except DomainError as exc:
+        raise http_exception_from_domain(exc) from exc
 
-    order_return.status = payload.status
-    if payload.staff_notes is not None:
-        order_return.staff_notes = payload.staff_notes
-    if payload.return_tracking_number is not None:
-        order_return.return_tracking_number = payload.return_tracking_number
-    if payload.return_carrier is not None:
-        order_return.return_carrier = payload.return_carrier
-
-    now = datetime.now(tz=timezone.utc)
-
-    if payload.status == ReturnStatus.RECEIVED and not order_return.received_at:
-        order_return.received_at = now
-
-    restocked_skus: list[tuple[str, int]] = []  # (inventory_item_id, qty_available)
-    if payload.status == ReturnStatus.RESTOCKED:
-        if order_return.restocked_at is not None:
-            raise HTTPException(status_code=400, detail="Return has already been restocked")
-        order_return.restocked_at = now
-        restocked_skus = await _restock_return_items(db, order_return)
-
-    await db.flush()
-
-    # Fire connector inventory sync for each restocked item (after flush so IDs are stable)
     if restocked_skus:
         from app.workers.inventory_sync import push_inventory_to_connectors
         for inv_item_id, qty_avail in restocked_skus:
             push_inventory_to_connectors.delay(inv_item_id, qty_avail)
 
-    # Audit event
     await _log_order_event(
         str(order_return.order_id),
         f"order.return_{payload.status.value.lower()}",
@@ -371,9 +292,7 @@ async def update_return_status(
             "new_status": payload.status.value,
         },
     )
-
-    reloaded = await _load_return(db, return_id)
-    return _return_response(reloaded)
+    return _return_response(order_return)
 
 
 @router.post("/{return_id}/refund", response_model=RefundResponse, status_code=201, dependencies=[Depends(get_current_user)])
@@ -386,69 +305,25 @@ async def create_refund_for_return(
     Create a refund tied to an existing return.
     Validates that amount does not exceed the original order total.
     """
-    order_return = await _load_return(db, return_id)
+    service = ReturnService(db)
+    try:
+        refund = await service.create_refund(return_id, payload)
+    except DomainError as exc:
+        raise http_exception_from_domain(exc) from exc
 
-    # Ensure a refund does not already exist for this return
-    if order_return.refund:
-        raise HTTPException(
-            status_code=400,
-            detail="A refund already exists for this return. Use the existing refund record.",
-        )
-
-    # Validate amount vs remaining refundable balance (cumulative check)
-    order = await db.get(Order, order_return.order_id)
-    if order and order.total_amount is not None:
-        existing_sum_row = await db.execute(
-            select(func.coalesce(func.sum(Refund.amount), 0))
-            .where(Refund.order_id == order_return.order_id)
-            .where(Refund.status != RefundStatus.FAILED)
-        )
-        existing_total = Decimal(str(existing_sum_row.scalar_one()))
-        if existing_total + payload.amount > Decimal(str(order.total_amount)):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Refund would exceed order total. Already refunded: {existing_total}, order total: {order.total_amount}.",
-            )
-
-    refund_number = None
-    for _ in range(5):
-        candidate = _generate_refund_number()
-        clash = await db.execute(select(Refund).where(Refund.refund_number == candidate))
-        if not clash.scalar_one_or_none():
-            refund_number = candidate
-            break
-    if not refund_number:
-        raise HTTPException(status_code=500, detail="Could not generate unique refund number")
-
-    refund = Refund(
-        refund_number=refund_number,
-        order_id=order_return.order_id,
-        return_id=return_id,
-        status=RefundStatus.PENDING,
-        refund_method=payload.refund_method,
-        amount=payload.amount,
-        currency=payload.currency,
-        transaction_id=payload.transaction_id,
-        reason=payload.reason,
-        notes=payload.notes,
-    )
-    db.add(refund)
-    await db.flush()
-
+    order_return = await service.load_return(return_id)
     await _log_order_event(
         str(order_return.order_id),
         "order.refunded",
         {
             "refund_id": str(refund.id),
-            "refund_number": refund_number,
+            "refund_number": refund.refund_number,
             "return_id": str(return_id),
             "amount": float(payload.amount),
             "currency": payload.currency,
             "method": payload.refund_method.value,
         },
     )
-
-    await db.refresh(refund)
     return RefundResponse.model_validate(refund)
 
 

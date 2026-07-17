@@ -21,6 +21,9 @@ from app.schemas.connectors import (
     ConnectorEventResponse, ConnectorTestResult, ConnectorToggleResponse,
 )
 from app.config import settings
+from app.services.connector_service import ConnectorService, webhook_url
+from app.services.error_mapping import http_exception_from_domain
+from app.services.exceptions import DomainError
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +31,7 @@ router = APIRouter(prefix="/connectors", tags=["Connectors"])
 
 
 def _webhook_url(connector_id) -> str:
-    base = settings.PUBLIC_BASE_URL.rstrip("/")
-    return f"{base}/connectors/{connector_id}/webhook"
+    return webhook_url(connector_id)
 
 
 def _to_response(connector: Connector) -> ConnectorResponse:
@@ -47,17 +49,12 @@ async def create_connector(
     _: dict = Depends(require_superadmin),
 ):
     """Create a new connector integration. Starts in INACTIVE status."""
-    connector = Connector(
-        name=payload.name,
-        connector_type=payload.connector_type,
-        direction=payload.direction,
-        status=ConnectorStatus.INACTIVE,
-        config=payload.config or {},
-    )
-    db.add(connector)
-    await db.flush()
-    await db.refresh(connector)
-    return _to_response(connector)
+    service = ConnectorService(db)
+    try:
+        connector = await service.create_connector(payload)
+        return _to_response(connector)
+    except DomainError as exc:
+        raise http_exception_from_domain(exc) from exc
 
 
 @router.get("/", response_model=list[ConnectorResponse])
@@ -68,13 +65,8 @@ async def list_connectors(
     _: dict = Depends(require_superadmin),
 ):
     """List all connectors, optionally filtered by status or type."""
-    q = select(Connector).order_by(Connector.created_at.desc())
-    if status:
-        q = q.where(Connector.status == status)
-    if connector_type:
-        q = q.where(Connector.connector_type == connector_type)
-    result = await db.execute(q)
-    return [_to_response(c) for c in result.scalars().all()]
+    service = ConnectorService(db)
+    return [_to_response(c) for c in await service.list_connectors(status=status, connector_type=connector_type)]
 
 
 @router.get("/{connector_id}", response_model=ConnectorResponse)
@@ -83,10 +75,11 @@ async def get_connector(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(require_superadmin),
 ):
-    connector = await db.get(Connector, connector_id)
-    if not connector:
-        raise HTTPException(status_code=404, detail="Connector not found")
-    return _to_response(connector)
+    try:
+        connector = await ConnectorService(db).get_connector(connector_id)
+        return _to_response(connector)
+    except DomainError as exc:
+        raise http_exception_from_domain(exc) from exc
 
 
 @router.patch("/{connector_id}", response_model=ConnectorResponse)
@@ -96,27 +89,12 @@ async def update_connector(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(require_superadmin),
 ):
-    connector = await db.get(Connector, connector_id)
-    if not connector:
-        raise HTTPException(status_code=404, detail="Connector not found")
-
-    if payload.name is not None:
-        connector.name = payload.name
-    if payload.direction is not None:
-        connector.direction = payload.direction
-    if payload.status is not None:
-        connector.status = payload.status
-    if payload.config is not None:
-        # Merge: preserve existing keys unless overwritten (so masked "***" values are skipped)
-        existing = connector.config or {}
-        for k, v in payload.config.items():
-            if v != "***":  # skip masked placeholders
-                existing[k] = v
-        connector.config = existing
-
-    await db.flush()
-    await db.refresh(connector)
-    return _to_response(connector)
+    service = ConnectorService(db)
+    try:
+        connector = await service.update_connector(connector_id, payload)
+        return _to_response(connector)
+    except DomainError as exc:
+        raise http_exception_from_domain(exc) from exc
 
 
 @router.delete("/{connector_id}", status_code=204)
@@ -125,10 +103,10 @@ async def delete_connector(
     db: AsyncSession = Depends(get_db),
     _: dict = Depends(require_superadmin),
 ):
-    connector = await db.get(Connector, connector_id)
-    if not connector:
-        raise HTTPException(status_code=404, detail="Connector not found")
-    await db.delete(connector)
+    try:
+        await ConnectorService(db).delete_connector(connector_id)
+    except DomainError as exc:
+        raise http_exception_from_domain(exc) from exc
 
 
 @router.post("/{connector_id}/toggle", response_model=ConnectorToggleResponse)
@@ -138,19 +116,11 @@ async def toggle_connector(
     _: dict = Depends(require_superadmin),
 ):
     """Toggle connector between ACTIVE and INACTIVE."""
-    connector = await db.get(Connector, connector_id)
-    if not connector:
-        raise HTTPException(status_code=404, detail="Connector not found")
-
-    if connector.status == ConnectorStatus.ACTIVE:
-        connector.status = ConnectorStatus.INACTIVE
-    else:
-        connector.status = ConnectorStatus.ACTIVE
-        connector.last_error = None  # clear error on re-activation
-
-    await db.flush()
-    await db.refresh(connector)
-    return ConnectorToggleResponse(id=connector.id, status=connector.status)
+    try:
+        connector = await ConnectorService(db).toggle_connector(connector_id)
+        return ConnectorToggleResponse(id=connector.id, status=connector.status)
+    except DomainError as exc:
+        raise http_exception_from_domain(exc) from exc
 
 
 @router.post("/{connector_id}/test", response_model=ConnectorTestResult)
@@ -160,26 +130,10 @@ async def test_connector(
     _: dict = Depends(require_superadmin),
 ):
     """Test connectivity and credentials for the connector."""
-    from app.services.connectors.registry import get_connector
-
-    connector = await db.get(Connector, connector_id)
-    if not connector:
-        raise HTTPException(status_code=404, detail="Connector not found")
-
     try:
-        impl = get_connector(connector)
-        result = await impl.test_connection()
-        return ConnectorTestResult(
-            success=result.get("success", False),
-            message=result.get("message", ""),
-            details=result.get("details"),
-        )
-    except ValueError as exc:
-        return ConnectorTestResult(
-            success=False,
-            message=str(exc),
-            details=None,
-        )
+        return await ConnectorService(db).test_connector(connector_id)
+    except DomainError as exc:
+        raise http_exception_from_domain(exc) from exc
 
 
 @router.post("/generate-secret", include_in_schema=True)
@@ -199,24 +153,16 @@ async def list_connector_events(
     _: dict = Depends(require_superadmin),
 ):
     """Paginated event log for a connector."""
-    connector = await db.get(Connector, connector_id)
-    if not connector:
-        raise HTTPException(status_code=404, detail="Connector not found")
-
-    q = (
-        select(ConnectorEvent)
-        .where(ConnectorEvent.connector_id == connector_id)
-        .order_by(ConnectorEvent.created_at.desc())
-        .limit(limit)
-        .offset(offset)
-    )
-    if direction:
-        q = q.where(ConnectorEvent.direction == direction)
-    if status:
-        q = q.where(ConnectorEvent.status == status)
-
-    result = await db.execute(q)
-    return result.scalars().all()
+    try:
+        return await ConnectorService(db).list_events(
+            connector_id,
+            direction=direction,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+    except DomainError as exc:
+        raise http_exception_from_domain(exc) from exc
 
 
 # ─── Inbound Webhook Receiver (PUBLIC — HMAC authenticated) ──────────────────

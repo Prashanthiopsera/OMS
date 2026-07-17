@@ -55,13 +55,39 @@ def test_get_redis_client_returns_none_when_not_initialized():
         redis_client.redis_pool = previous
 
 
+@pytest.fixture
+def redis_available():
+    """Skip integration cache tests when Redis is unreachable or requires auth."""
+    import asyncio
+
+    from app.config import settings
+    from app.database import redis_client
+
+    async def _ping():
+        pool = redis_client.redis_asyncio.ConnectionPool.from_url(
+            settings.REDIS_URL, decode_responses=True,
+        )
+        client = redis_client.redis_asyncio.Redis(connection_pool=pool)
+        try:
+            await client.ping()
+            return True
+        except Exception:
+            return False
+        finally:
+            await client.aclose()
+            await pool.aclose()
+
+    if not asyncio.run(_ping()):
+        pytest.skip("Redis not available for integration tests")
+
+
 @pytest.mark.integration
 class TestCacheHelpers:
     """WO-013: get/set/delete/exists operations against a real Redis
     instance (see docker-compose.yml / CI's redis service)."""
 
     @pytest.fixture(autouse=True)
-    def _pool(self):
+    def _pool(self, redis_available):
         from app.config import settings
         from app.database import redis_client
         redis_client.redis_pool = redis_client.redis_asyncio.ConnectionPool.from_url(

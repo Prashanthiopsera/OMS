@@ -33,6 +33,14 @@ from app.schemas.invoices import (
     PaymentCreate,
     PaymentResponse,
 )
+from app.services.error_mapping import http_exception_from_domain
+from app.services.exceptions import DomainError
+from app.services.invoicing_service import (
+    InvoicingService,
+    compute_due_date,
+    generate_invoice_number,
+    generate_memo_number,
+)
 
 router = APIRouter(
     prefix="/invoices",
@@ -55,33 +63,15 @@ credit_memo_router = APIRouter(
 # ---------------------------------------------------------------------------
 
 def _generate_invoice_number() -> str:
-    month_str = datetime.now(tz=timezone.utc).strftime("%Y%m")
-    suffix = secrets.token_hex(3).upper()  # 6 hex chars
-    return f"INV-{month_str}-{suffix}"
+    return generate_invoice_number()
 
 
 def _generate_memo_number() -> str:
-    month_str = datetime.now(tz=timezone.utc).strftime("%Y%m")
-    suffix = secrets.token_hex(3).upper()  # 6 hex chars
-    return f"CM-{month_str}-{suffix}"
+    return generate_memo_number()
 
 
 def _compute_due_date(payment_terms: str, issued: date) -> date:
-    """Compute due date from payment_terms snapshot string."""
-    terms_map = {
-        "NET_15": 15,
-        "NET_30": 30,
-        "NET_60": 60,
-        "NET_90": 90,
-        "NET30": 30,
-        "NET60": 60,
-        "NET90": 90,
-        "COD": 0,
-        "UPON_RECEIPT": 0,
-        "PREPAID": 0,
-    }
-    days = terms_map.get(payment_terms.upper(), 0)
-    return issued + timedelta(days=days)
+    return compute_due_date(payment_terms, issued)
 
 
 async def _load_invoice(db: AsyncSession, invoice_id: UUID) -> Invoice:
@@ -105,67 +95,7 @@ async def _load_invoice(db: AsyncSession, invoice_id: UUID) -> Invoice:
 async def _create_invoice_from_order_internal(
     db: AsyncSession, order
 ) -> Invoice:
-    """
-    Core idempotent logic for auto-creating an invoice from a delivered B2B order.
-    Returns existing invoice if one already exists for this order_id.
-    """
-    # Idempotency check
-    existing_result = await db.execute(
-        select(Invoice).where(Invoice.order_id == order.id)
-    )
-    existing = existing_result.scalar_one_or_none()
-    if existing:
-        return existing
-
-    if not order.customer_account_id:
-        raise HTTPException(
-            status_code=400,
-            detail="Order has no customer_account_id — cannot create B2B invoice",
-        )
-
-    account = await db.get(CustomerAccount, order.customer_account_id)
-    if not account:
-        raise HTTPException(status_code=404, detail="Customer account not found")
-
-    today = datetime.now(tz=timezone.utc).date()
-    payment_terms_snapshot = order.payment_terms or account.payment_terms or "PREPAID"
-    due = _compute_due_date(payment_terms_snapshot, today)
-
-    subtotal = Decimal(str(order.subtotal or 0))
-    tax_amount = Decimal(str(order.tax_amount or 0))
-    total_amount = Decimal(str(order.total_amount or 0))
-
-    # Collision-safe invoice number generation
-    inv_number = None
-    for _ in range(5):
-        candidate = _generate_invoice_number()
-        clash = await db.execute(select(Invoice).where(Invoice.invoice_number == candidate))
-        if not clash.scalar_one_or_none():
-            inv_number = candidate
-            break
-
-    if not inv_number:
-        raise HTTPException(status_code=500, detail="Could not generate unique invoice number")
-
-    invoice = Invoice(
-        invoice_number=inv_number,
-        customer_account_id=order.customer_account_id,
-        order_id=order.id,
-        status=InvoiceStatus.DRAFT,
-        subtotal=subtotal,
-        tax_amount=tax_amount,
-        total_amount=total_amount,
-        currency=order.currency or "USD",
-        issued_date=today,
-        due_date=due,
-        payment_terms=payment_terms_snapshot,
-        notes=None,
-        metadata_={},
-    )
-    db.add(invoice)
-    await db.flush()
-    await db.refresh(invoice)
-    return invoice
+    return await InvoicingService(db).create_invoice_from_order(order)
 
 
 # ---------------------------------------------------------------------------
@@ -175,51 +105,7 @@ async def _create_invoice_from_order_internal(
 @router.get("/aging", response_model=ARAgingResponse)
 async def get_ar_aging(db: AsyncSession = Depends(get_db)):
     """Accounts receivable aging report: current / 1-30 / 31-60 / 61-90 / 90+ days."""
-    today = datetime.now(tz=timezone.utc).date()
-
-    stmt = select(Invoice).where(
-        Invoice.status.notin_([InvoiceStatus.PAID, InvoiceStatus.VOID, InvoiceStatus.DRAFT])
-    )
-    result = await db.execute(stmt)
-    invoices = result.scalars().all()
-
-    current_bucket = ARAgingBucket(count=0, total_amount=Decimal("0"))
-    bucket_1_30 = ARAgingBucket(count=0, total_amount=Decimal("0"))
-    bucket_31_60 = ARAgingBucket(count=0, total_amount=Decimal("0"))
-    bucket_61_90 = ARAgingBucket(count=0, total_amount=Decimal("0"))
-    bucket_over_90 = ARAgingBucket(count=0, total_amount=Decimal("0"))
-    total_outstanding = Decimal("0")
-
-    for inv in invoices:
-        amount = Decimal(str(inv.total_amount or 0))
-        days_overdue = (today - inv.due_date).days
-
-        if days_overdue <= 0:
-            current_bucket.count += 1
-            current_bucket.total_amount += amount
-        elif days_overdue <= 30:
-            bucket_1_30.count += 1
-            bucket_1_30.total_amount += amount
-        elif days_overdue <= 60:
-            bucket_31_60.count += 1
-            bucket_31_60.total_amount += amount
-        elif days_overdue <= 90:
-            bucket_61_90.count += 1
-            bucket_61_90.total_amount += amount
-        else:
-            bucket_over_90.count += 1
-            bucket_over_90.total_amount += amount
-
-        total_outstanding += amount
-
-    return ARAgingResponse(
-        current=current_bucket,
-        days_1_30=bucket_1_30,
-        days_31_60=bucket_31_60,
-        days_61_90=bucket_61_90,
-        over_90=bucket_over_90,
-        total_outstanding=total_outstanding,
-    )
+    return await InvoicingService(db).get_ar_aging()
 
 
 @router.get("/account/{account_id}", response_model=InvoiceListResponse)

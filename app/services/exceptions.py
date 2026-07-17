@@ -35,3 +35,27 @@ class BrandAccessDeniedError(DomainError):
 
 class InsufficientInventoryError(DomainError):
     """Raised when inventory cannot satisfy a reservation or allocation."""
+
+
+class InventoryNotFoundError(DomainError):
+    """Raised when an inventory item or SKU lookup fails."""
+
+
+class NodeNotFoundError(DomainError):
+    """Raised when a fulfillment node ID does not exist."""
+
+
+class ConnectorNotFoundError(DomainError):
+    """Raised when a connector ID does not exist."""
+
+
+class ReturnNotFoundError(DomainError):
+    """Raised when a return/RMA ID does not exist."""
+
+
+class InvoiceNotFoundError(DomainError):
+    """Raised when an invoice ID does not exist."""
+
+
+class DuplicateResourceError(DomainError):
+    """Raised when a unique constraint would be violated."""

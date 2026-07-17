@@ -6,11 +6,17 @@ from fastapi import HTTPException
 from app.services.exceptions import (
     AccountOnHoldError,
     BrandAccessDeniedError,
+    ConnectorNotFoundError,
     CreditLimitExceededError,
     DomainError,
+    DuplicateResourceError,
     InsufficientInventoryError,
     InvalidStatusTransitionError,
+    InventoryNotFoundError,
+    InvoiceNotFoundError,
+    NodeNotFoundError,
     OrderNotFoundError,
+    ReturnNotFoundError,
 )
 
 
@@ -26,4 +32,9 @@ def http_exception_from_domain(err: DomainError) -> HTTPException:
         return HTTPException(status_code=422, detail=err.message)
     if isinstance(err, InsufficientInventoryError):
         return HTTPException(status_code=409, detail=err.message)
+    if isinstance(err, DuplicateResourceError):
+        return HTTPException(status_code=409, detail=err.message)
+    if isinstance(err, (InventoryNotFoundError, NodeNotFoundError, ConnectorNotFoundError,
+                        ReturnNotFoundError, InvoiceNotFoundError)):
+        return HTTPException(status_code=404, detail=err.message)
     return HTTPException(status_code=500, detail=err.message)
