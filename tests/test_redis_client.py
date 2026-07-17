@@ -10,6 +10,8 @@ Run with: PYTHONPATH=. pytest tests/test_redis_client.py -v
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -51,3 +53,63 @@ def test_get_redis_client_returns_none_when_not_initialized():
         assert redis_client.get_redis_client() is None
     finally:
         redis_client.redis_pool = previous
+
+
+@pytest.mark.integration
+class TestCacheHelpers:
+    """WO-013: get/set/delete/exists operations against a real Redis
+    instance (see docker-compose.yml / CI's redis service)."""
+
+    @pytest.fixture(autouse=True)
+    def _pool(self):
+        from app.config import settings
+        from app.database import redis_client
+        redis_client.redis_pool = redis_client.aioredis.ConnectionPool.from_url(
+            settings.REDIS_URL, decode_responses=True,
+        )
+        yield
+        redis_client.redis_pool = None
+
+    @pytest.mark.asyncio
+    async def test_cache_set_get_delete_roundtrip(self):
+        from app.database.redis_client import cache_get, cache_set, cache_delete, get_redis_client
+
+        client = get_redis_client()
+        key = "test:wo013:roundtrip"
+        try:
+            assert await cache_get(key, client) is None
+            await cache_set(key, "hello", ttl=30, redis_client=client)
+            assert await cache_get(key, client) == "hello"
+            await cache_delete(key, client)
+            assert await cache_get(key, client) is None
+        finally:
+            await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_cache_set_respects_ttl(self):
+        from app.database.redis_client import cache_set, get_redis_client
+
+        client = get_redis_client()
+        key = "test:wo013:ttl"
+        try:
+            await cache_set(key, "value", ttl=60, redis_client=client)
+            ttl = await client.ttl(key)
+            assert 0 < ttl <= 60
+        finally:
+            await client.delete(key)
+            await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_cache_delete_pattern_removes_matching_keys(self):
+        from app.database.redis_client import cache_delete_pattern, get_redis_client
+
+        client = get_redis_client()
+        keys = ["test:wo013:pattern:1", "test:wo013:pattern:2"]
+        try:
+            for k in keys:
+                await client.set(k, "1")
+            await cache_delete_pattern("test:wo013:pattern:*", client)
+            for k in keys:
+                assert await client.exists(k) == 0
+        finally:
+            await client.aclose()
