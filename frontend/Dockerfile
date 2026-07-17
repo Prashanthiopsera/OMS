@@ -1,5 +1,5 @@
 # ---- Build stage ----
-FROM node:20-alpine AS builder
+FROM node:24-alpine AS builder
 WORKDIR /app
 # Accept Shopify API key at build time so Vite can embed it in the bundle
 ARG VITE_SHOPIFY_API_KEY=""
