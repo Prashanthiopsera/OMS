@@ -258,6 +258,30 @@ async def test_api_key_lookup_returns_owner_context(
 
 
 @pytest.mark.asyncio
+async def test_expired_api_key_rejected(behavioral_session: AsyncSession, user_factory, api_key_factory):
+    from datetime import datetime, timedelta, timezone
+
+    owner = await persist_user(behavioral_session, user_factory)
+    api_key, raw_key = api_key_factory(
+        owner_user_id=owner.id,
+        expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    behavioral_session.add(api_key)
+    await behavioral_session.flush()
+
+    request = SimpleNamespace(
+        state=SimpleNamespace(user=None),
+        headers={"X-API-Key": raw_key},
+    )
+    from fastapi import HTTPException
+
+    with patch("app.database.postgres.async_session_factory", _TestSessionFactory(behavioral_session)):
+        with pytest.raises(HTTPException) as exc_info:
+            await get_current_user_or_api_key(request)
+    assert exc_info.value.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_api_key_invalid_key_rejected(behavioral_session: AsyncSession):
     request = SimpleNamespace(
         state=SimpleNamespace(user=None),
