@@ -17,7 +17,6 @@ pymongo==4.7.2
 
 # Database - Redis
 redis==5.0.4
-aioredis==2.0.1
 
 # Database - Elasticsearch
 elasticsearch[async]==8.13.0
