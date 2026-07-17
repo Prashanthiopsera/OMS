@@ -1,5 +1,5 @@
 """
-Unit tests for app.database.redis_client — WO-011 (aioredis -> redis.asyncio
+Unit tests for app.database.redis_client — WO-012 (aioredis -> redis.asyncio
 migration). Verifies the module exclusively uses redis.asyncio (redis-py's
 built-in async client, not the abandoned standalone `aioredis` package) and
 that clients are backed by a shared connection pool rather than a
@@ -24,13 +24,13 @@ def test_module_uses_redis_asyncio_not_standalone_aioredis():
     import app.database.redis_client as redis_client_module
     import redis.asyncio as redis_asyncio
 
-    assert redis_client_module.aioredis is redis_asyncio
+    assert redis_client_module.redis_asyncio is redis_asyncio
 
 
 def test_get_redis_client_uses_shared_connection_pool():
     from app.database import redis_client
 
-    redis_client.redis_pool = redis_client.aioredis.ConnectionPool.from_url(
+    redis_client.redis_pool = redis_client.redis_asyncio.ConnectionPool.from_url(
         "redis://localhost:6380/0", decode_responses=True,
     )
     try:
@@ -64,7 +64,7 @@ class TestCacheHelpers:
     def _pool(self):
         from app.config import settings
         from app.database import redis_client
-        redis_client.redis_pool = redis_client.aioredis.ConnectionPool.from_url(
+        redis_client.redis_pool = redis_client.redis_asyncio.ConnectionPool.from_url(
             settings.REDIS_URL, decode_responses=True,
         )
         yield

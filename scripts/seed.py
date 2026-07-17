@@ -943,10 +943,10 @@ async def seed_mongodb():
 
 async def seed_redis():
     print("Seeding Redis...")
-    import redis.asyncio as aioredis
+    import redis.asyncio as redis_asyncio
     from app.config import settings
 
-    client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+    client = redis_asyncio.from_url(settings.REDIS_URL, decode_responses=True)
 
     await client.set("oms:version", "1.0.0", ex=86400)
     await client.set("oms:env", settings.ENVIRONMENT, ex=86400)

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-import redis.asyncio as aioredis
+import redis.asyncio as redis_asyncio
 
 from app.database.postgres import get_db
 from app.database.mongodb import get_mongo_db
@@ -29,7 +29,7 @@ STAGE_EVENTS = [
 @router.get("/system")
 async def system_health(
     _: dict = Depends(require_superadmin),
-    redis: aioredis.Redis = Depends(get_redis),
+    redis: redis_asyncio.Redis = Depends(get_redis),
     db: AsyncSession = Depends(get_db),
     mdb=Depends(get_mongo_db),
 ):

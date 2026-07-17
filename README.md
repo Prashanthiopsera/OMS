@@ -142,7 +142,7 @@ Want a connector that's not listed? [Open a connector request](https://github.co
 | API | FastAPI 0.111, Python 3.12, Pydantic v2 |
 | Primary DB | PostgreSQL 16 (asyncpg) |
 | Document DB | MongoDB 7.0 (Motor async) |
-| Cache / Queue broker | Redis 7.2 (aioredis) |
+| Cache / Queue broker | Redis 7.2 (redis.asyncio) |
 | Search | Elasticsearch 8.12 |
 | Task queue | Celery 5.4 — 7 queues |
 | Frontend | React 18, TypeScript, Vite, TailwindCSS, TanStack Query v5 |
@@ -399,7 +399,7 @@ OMS/
 │   ├── database/
 │   │   ├── postgres.py             # Async SQLAlchemy engine + session factory
 │   │   ├── mongodb.py              # Motor async client + index creation
-│   │   ├── redis_client.py         # aioredis pool + cache helpers
+│   │   ├── redis_client.py         # redis.asyncio pool + cache helpers
 │   │   └── elasticsearch_client.py # Async ES client + index mapping creation
 │   │
 │   ├── models/postgres/
