@@ -18,6 +18,41 @@ pytestmark = pytest.mark.requires_db
 
 
 @pytest.mark.asyncio
+async def test_login_nonexistent_email_rejected(behavioral_client: AsyncClient):
+    response = await behavioral_client.post(
+        "/auth/login",
+        json={"email": "nobody@example.com", "password": "any-password"},
+    )
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_expired_token_rejected_on_me(
+    behavioral_client: AsyncClient,
+    behavioral_session: AsyncSession,
+    user_factory,
+):
+    """Expired JWT must be rejected by auth middleware on protected routes."""
+    from datetime import datetime, timedelta, timezone
+
+    import jwt
+
+    from app.config import settings
+    from app.core.security import ALGORITHM
+
+    user = await persist_user(behavioral_session, user_factory)
+    expired = {
+        "sub": str(user.id),
+        "email": user.email,
+        "exp": datetime.now(timezone.utc) - timedelta(minutes=5),
+        "jti": "expired-test-jti",
+    }
+    token = jwt.encode(expired, settings.SECRET_KEY, algorithm=ALGORITHM)
+    response = await behavioral_client.get("/auth/me", headers=auth_headers(token))
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_login_success_returns_jwt_and_user_info(
     behavioral_client: AsyncClient,
     behavioral_session: AsyncSession,
