@@ -45,6 +45,11 @@ packages = ["kuberiva_oms"]
 "kuberiva_oms/assets/docker-compose.yml" = "kuberiva_oms/assets/docker-compose.yml"
 "kuberiva_oms/assets/.env.example" = "kuberiva_oms/assets/.env.example"
 
+[tool.pytest.ini_options]
+markers = [
+    "integration: system integration tests requiring live Postgres/MongoDB/Redis (see docker-compose.yml)",
+]
+
 [tool.ruff.lint]
 ignore = [
     "E402",  # Module level import not at top — common FastAPI pattern (routers after app init)
