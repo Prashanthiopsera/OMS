@@ -28,6 +28,9 @@ from app.schemas.orders import (
     OrderStatusUpdate, CancelOrderRequest, OrderFilterParams,
     PaymentStatusUpdate, OrderEdit,
 )
+from app.services.error_mapping import http_exception_from_domain
+from app.services.exceptions import DomainError
+from app.services.order_service import OrderService, generate_order_number
 
 # B2B models — imported lazily inside functions to tolerate model agent ordering
 try:
@@ -42,11 +45,7 @@ router = APIRouter(prefix="/orders", tags=["Orders"], dependencies=[Depends(get_
 
 
 def _generate_order_number() -> str:
-    import random, string
-    prefix = "ORD"
-    ts = datetime.utcnow().strftime("%Y%m%d")
-    rand = "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
-    return f"{prefix}-{ts}-{rand}"
+    return generate_order_number()
 
 
 async def _index_order_in_es(order: Order):
@@ -100,208 +99,14 @@ async def create_order(
     db: AsyncSession = Depends(get_db),
     brand_ids: Optional[List[str]] = Depends(get_accessible_brand_ids),
 ):
-    # Brand-scope guard: reject if the caller is restricted and the order's
-    # brand_id is not in their allowed set.
-    order_brand_id = str(payload.brand_id) if getattr(payload, "brand_id", None) else None
-    if brand_ids is not None:
-        # brand_ids == [] means no brands accessible at all
-        if not brand_ids:
-            raise HTTPException(
-                status_code=403,
-                detail="You have no brand access in this environment",
-            )
-        if order_brand_id and order_brand_id not in brand_ids:
-            raise HTTPException(
-                status_code=403,
-                detail=f"You do not have access to brand {order_brand_id}",
-            )
+    service = OrderService(db)
+    try:
+        order = await service.create_order(payload, brand_ids=brand_ids)
+    except DomainError as exc:
+        raise http_exception_from_domain(exc) from exc
 
-    # Calculate totals
-    subtotal = sum(
-        (item.unit_price * item.quantity) - item.discount_amount
-        for item in payload.line_items
-    )
-    tax_amount = sum(item.tax_amount * item.quantity for item in payload.line_items)
-    total = subtotal + tax_amount + payload.shipping_amount - payload.discount_amount
-
-    # Resolve the lifecycle that governs this order's status transitions
-    from app.services.lifecycle_engine import resolve_lifecycle
-    _ot = payload.order_type.value if hasattr(payload, "order_type") and payload.order_type else None
-    _bid = str(payload.brand_id) if hasattr(payload, "brand_id") and payload.brand_id else None
-    lc, _ = await resolve_lifecycle(
-        db,
-        payload.fulfillment_type.value,
-        payload.channel.value,
-        pipeline_type="ORDER",
-        order_type=_ot,
-        brand_id=_bid,
-    )
-
-    # B2B account validation — runs only when the order carries a customer_account_id
-    # and the b2b_models module is available (added by model agent).
-    approval_status: Optional[str] = None
-    b2b_account = None
-    order_total_float = float(total)
-
-    customer_account_id = getattr(payload, "customer_account_id", None)
-    if customer_account_id and _B2B_MODELS_AVAILABLE:
-        # SELECT FOR UPDATE to prevent concurrent credit over-commitment
-        acct_result = await db.execute(
-            select(CustomerAccount)
-            .where(CustomerAccount.id == customer_account_id)
-            .with_for_update()
-        )
-        account = acct_result.scalar_one_or_none()
-        if not account:
-            raise HTTPException(status_code=404, detail="Customer account not found")
-
-        # Fix 1: ON_HOLD accounts cannot place new orders
-        if account.account_type == AccountType.ON_HOLD:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Account {account.account_number} is ON_HOLD — new orders are blocked",
-            )
-
-        # Resolve approval_status from payload (B2B orders may start as PENDING)
-        raw_approval_status = getattr(payload, "approval_status", None)
-        if raw_approval_status is not None:
-            approval_status = (
-                raw_approval_status.value
-                if hasattr(raw_approval_status, "value")
-                else str(raw_approval_status)
-            )
-        else:
-            # Determine automatically based on credit limit
-            if (
-                account.credit_limit is not None
-                and float(account.credit_used or 0) + order_total_float > float(account.credit_limit)
-            ):
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"Credit limit exceeded for account {account.account_number}: "
-                        f"limit={account.credit_limit}, used={account.credit_used}, "
-                        f"order={order_total_float}"
-                    ),
-                )
-            approval_status = ApprovalStatus.PENDING.value if hasattr(ApprovalStatus, "PENDING") else None
-
-        b2b_account = account
-
-    # Initial order status: B2B PENDING orders wait for approval before entering CONFIRMED
-    initial_order_status = (
-        OrderStatus.PENDING
-        if approval_status == (ApprovalStatus.PENDING.value if _B2B_MODELS_AVAILABLE and hasattr(ApprovalStatus, "PENDING") else "__never__")
-        else OrderStatus.CONFIRMED
-    )
-
-    order = Order(
-        order_number=_generate_order_number(),
-        channel=payload.channel,
-        fulfillment_type=payload.fulfillment_type,
-        status=initial_order_status,
-        customer_email=str(payload.customer_email),
-        customer_phone=payload.customer_phone,
-        customer_name=payload.customer_name,
-        customer_id=payload.customer_id,
-        subtotal=subtotal,
-        tax_amount=tax_amount,
-        shipping_amount=payload.shipping_amount,
-        discount_amount=payload.discount_amount,
-        total_amount=total,
-        currency=payload.currency,
-        pickup_node_id=payload.pickup_node_id,
-        lifecycle_id=lc.id if lc else None,
-        external_order_id=payload.external_order_id,
-        tags=payload.tags,
-        notes=payload.notes,
-        metadata_=payload.metadata,
-    )
-
-    # Attach B2B fields if the column exists on the model
-    if customer_account_id and _B2B_MODELS_AVAILABLE:
-        if hasattr(order, "customer_account_id"):
-            order.customer_account_id = customer_account_id
-        if hasattr(order, "approval_status") and approval_status is not None:
-            order.approval_status = approval_status
-
-    if payload.shipping_address:
-        addr = payload.shipping_address
-        order.shipping_name = addr.name
-        order.shipping_address1 = addr.address1
-        order.shipping_address2 = addr.address2
-        order.shipping_city = addr.city
-        order.shipping_state = addr.state
-        order.shipping_postal_code = addr.postal_code
-        order.shipping_country = addr.country
-        order.shipping_latitude = addr.latitude
-        order.shipping_longitude = addr.longitude
-
-        # Geocode if coordinates not explicitly provided
-        if addr.latitude is None or addr.longitude is None:
-            try:
-                from app.services.geocoding import geocode_address
-                coords = await geocode_address(
-                    postal_code=addr.postal_code or "",
-                    city=addr.city or "",
-                    state=addr.state or "",
-                    country=addr.country or "US",
-                )
-                if coords:
-                    order.shipping_latitude, order.shipping_longitude = coords
-            except Exception:
-                pass  # geocoding failure is non-fatal
-
-    db.add(order)
-    await db.flush()
-
-    # Create line items
-    for item_data in payload.line_items:
-        item_total = (item_data.unit_price * item_data.quantity) - item_data.discount_amount + (item_data.tax_amount * item_data.quantity)
-        item = OrderItem(
-            order_id=order.id,
-            sku=item_data.sku,
-            product_name=item_data.product_name,
-            quantity=item_data.quantity,
-            unit_price=item_data.unit_price,
-            discount_amount=item_data.discount_amount,
-            tax_amount=item_data.tax_amount,
-            total_price=item_total,
-            weight_lbs=item_data.weight_lbs,
-            metadata_=item_data.metadata,
-        )
-        db.add(item)
-
-    await db.flush()
-
-    # Fix 2: Reserve credit only when the order is NOT waiting for approval.
-    # PENDING B2B orders have not been committed yet — credit is locked at approval time.
-    if b2b_account is not None and approval_status != (
-        ApprovalStatus.PENDING.value if _B2B_MODELS_AVAILABLE and hasattr(ApprovalStatus, "PENDING") else "__never__"
-    ):
-        b2b_account.credit_used = Decimal(
-            str(float(b2b_account.credit_used or 0) + order_total_float)
-        )
-        await db.flush()
-
-    await db.refresh(order)
-
-    # Reload with relationships
-    result = await db.execute(
-        select(Order)
-        .options(
-            selectinload(Order.line_items),
-            selectinload(Order.fulfillment_allocations).selectinload(FulfillmentAllocation.node),
-            selectinload(Order.shipments),
-        )
-        .where(Order.id == order.id)
-    )
-    order = result.scalar_one()
-
-    # Resolve environment_id from request state (set by EnvironmentMiddleware)
     env_id = getattr(request.state, "environment_id", "") or ""
 
-    # Background: Elasticsearch + MongoDB + trigger sourcing + confirmation notification
     background_tasks.add_task(_index_order_in_es, order)
     background_tasks.add_task(_log_order_event, str(order.id), "order.created", {
         "order_number": order.order_number,
@@ -679,46 +484,11 @@ async def update_order_status(
     db: AsyncSession = Depends(get_db),
     brand_ids: Optional[List[str]] = Depends(get_accessible_brand_ids),
 ):
-    result = await db.execute(
-        select(Order)
-        .options(
-            selectinload(Order.line_items),
-            selectinload(Order.fulfillment_allocations).selectinload(FulfillmentAllocation.node),
-            selectinload(Order.shipments),
-        )
-        .where(Order.id == order_id)
-    )
-    order = result.scalar_one_or_none()
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    if brand_ids is not None:
-        if not brand_ids or str(order.brand_id) not in brand_ids:
-            raise HTTPException(status_code=403, detail="Access denied")
-
-    old_status = order.status
-
-    # Validate the transition is allowed by the order's lifecycle
-    from app.services.lifecycle_engine import validate_transition
-    allowed, reason = await validate_transition(db, order, payload.status.value)
-    if not allowed:
-        raise HTTPException(status_code=422, detail=reason)
-
-    order.status = payload.status
-    if payload.notes:
-        order.notes = payload.notes
-
-    # Set timestamps based on status
-    now = datetime.utcnow()
-    if payload.status == OrderStatus.CONFIRMED and not order.confirmed_at:
-        order.confirmed_at = now
-    elif payload.status in (OrderStatus.DELIVERED, OrderStatus.PICKED_UP):
-        order.delivered_at = now
-    elif payload.status == OrderStatus.CANCELLED:
-        order.cancelled_at = now
-
-    await db.flush()
-    await db.refresh(order)
+    service = OrderService(db)
+    try:
+        order, old_status = await service.update_status(order_id, payload, brand_ids=brand_ids)
+    except DomainError as exc:
+        raise http_exception_from_domain(exc) from exc
 
     background_tasks.add_task(_index_order_in_es, order)
     background_tasks.add_task(_log_order_event, str(order.id), f"order.{payload.status.value.lower()}", {
@@ -728,7 +498,6 @@ async def update_order_status(
     })
     background_tasks.add_task(_dispatch_webhook, str(order.id), f"order.{payload.status.value.lower()}")
 
-    # Trigger outbound connector sync when order ships or is cancelled
     if payload.status == OrderStatus.SHIPPED and order.connector_id:
         background_tasks.add_task(_trigger_connector_sync, str(order.id))
     elif payload.status == OrderStatus.CANCELLED and order.connector_id:
@@ -784,55 +553,11 @@ async def cancel_order(
     db: AsyncSession = Depends(get_db),
     brand_ids: Optional[List[str]] = Depends(get_accessible_brand_ids),
 ):
-    result = await db.execute(
-        select(Order)
-        .options(
-            selectinload(Order.line_items),
-            selectinload(Order.fulfillment_allocations).selectinload(FulfillmentAllocation.node),
-            selectinload(Order.shipments),
-        )
-        .where(Order.id == order_id)
-    )
-    order = result.scalar_one_or_none()
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-
-    if brand_ids is not None:
-        if not brand_ids or str(order.brand_id) not in brand_ids:
-            raise HTTPException(status_code=403, detail="Access denied")
-
-    if order.status in (OrderStatus.SHIPPED, OrderStatus.DELIVERED, OrderStatus.CANCELLED):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot cancel order in status: {order.status.value}"
-        )
-
-    order.status = OrderStatus.CANCELLED
-    order.cancelled_at = datetime.now(tz=timezone.utc)
-    order.notes = f"Cancelled: {payload.reason}"
-
-    # Fix 2 (cancel side): only release credit_used when the order was APPROVED
-    # (i.e. credit was actually reserved). PENDING/REJECTED orders never had credit locked.
-    if (
-        _B2B_MODELS_AVAILABLE
-        and hasattr(order, "customer_account_id")
-        and order.customer_account_id is not None
-        and hasattr(order, "approval_status")
-        and order.approval_status == ApprovalStatus.APPROVED.value
-    ):
-        acct_result = await db.execute(
-            select(CustomerAccount)
-            .where(CustomerAccount.id == order.customer_account_id)
-            .with_for_update()
-        )
-        cancel_account = acct_result.scalar_one_or_none()
-        if cancel_account is not None:
-            released = float(order.total_amount or 0)
-            new_used = max(0.0, float(cancel_account.credit_used or 0) - released)
-            cancel_account.credit_used = Decimal(str(new_used))
-
-    await db.flush()
-    await db.refresh(order)
+    service = OrderService(db)
+    try:
+        order = await service.cancel_order(order_id, payload, brand_ids=brand_ids)
+    except DomainError as exc:
+        raise http_exception_from_domain(exc) from exc
 
     background_tasks.add_task(_log_order_event, str(order.id), "order.cancelled", {
         "reason": payload.reason,
@@ -840,11 +565,9 @@ async def cancel_order(
     })
     background_tasks.add_task(_dispatch_webhook, str(order.id), "order.cancelled")
 
-    # Customer cancellation notification
     if payload.notify_customer:
         background_tasks.add_task(_trigger_cancellation_notification, str(order.id), payload.reason)
 
-    # Push cancellation to external connector platform
     if order.connector_id:
         background_tasks.add_task(_trigger_connector_cancel, str(order.id))
 
