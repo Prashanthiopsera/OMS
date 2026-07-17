@@ -13,6 +13,7 @@ Run with: PYTHONPATH=. pytest tests/test_auth_integration.py -v
 import os
 import sys
 import uuid
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -100,6 +101,19 @@ def test_login_with_wrong_password_rejected(client, test_user):
 def test_unauthenticated_request_rejected(client):
     resp = client.get("/auth/me")
     assert resp.status_code == 401
+
+
+@pytest.mark.integration
+def test_authenticated_request_returns_503_when_redis_unavailable(client, test_user):
+    """WO-012: fail-closed on Redis outage must surface as 503, not 401,
+    all the way through the auth middleware."""
+    email, password = test_user
+    login_resp = client.post("/auth/login", json={"email": email, "password": password})
+    access_token = login_resp.json()["access_token"]
+
+    with patch("app.database.redis_client.get_redis_client", return_value=None):
+        resp = client.get("/auth/me", headers={"Authorization": f"Bearer {access_token}"})
+    assert resp.status_code == 503
 
 
 @pytest.mark.integration

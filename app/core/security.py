@@ -108,8 +108,10 @@ async def verify_token_async(token: str) -> dict[str, Any]:
     """Async variant that additionally checks the Redis revocation blocklist
     and the per-user disable key set when an account is deactivated.
 
-    Fails closed: if Redis is unavailable the request is denied with 401 to
-    prevent revoked tokens from being accepted during an outage.
+    Fails closed: if Redis is unavailable the request is denied with 503
+    (service unavailable) rather than 401, to distinguish "we can't verify
+    you right now" from "your credentials are bad" — and, crucially, to
+    never accept a potentially-revoked token during an outage.
     """
     payload = verify_token(token)
     jti = payload.get("jti")
@@ -117,7 +119,7 @@ async def verify_token_async(token: str) -> dict[str, Any]:
         revoked = await _is_token_revoked(jti)
         if revoked is _REDIS_UNAVAILABLE:
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Authentication service temporarily unavailable",
             )
         if revoked:
@@ -133,7 +135,7 @@ async def verify_token_async(token: str) -> dict[str, Any]:
             redis = get_redis_client()
             if redis is None:
                 raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="Authentication service temporarily unavailable",
                 )
             disabled = await redis.exists(f"user:disabled:{sub}")
@@ -148,7 +150,7 @@ async def verify_token_async(token: str) -> dict[str, Any]:
         except Exception:
             # Redis connection error — fail-closed
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Authentication service temporarily unavailable",
             )
     return payload

@@ -5,7 +5,7 @@ import logging.config
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
@@ -477,6 +477,15 @@ async def auth_middleware(request: Request, call_next):
     try:
         payload = await verify_token_async(token)
         request.state.user = payload
+    except HTTPException as exc:
+        # Preserve the specific status (e.g. 503 when Redis is unavailable
+        # and we must fail closed, vs 401 for a genuinely bad/expired/
+        # revoked token) instead of collapsing everything to 401.
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     except Exception:
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,

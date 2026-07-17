@@ -132,11 +132,14 @@ async def test_verify_token_async_rejects_revoked_token():
 
 @pytest.mark.asyncio
 async def test_verify_token_async_fails_closed_when_redis_unavailable():
+    """Redis outage must deny access with 503 (service unavailable), not a
+    plain 401 — this distinguishes "can't verify you" from "bad token" and
+    still guarantees a potentially-revoked token is never accepted."""
     token = create_access_token({"sub": "user-123"})
     with patch("app.database.redis_client.get_redis_client", return_value=None):
         with pytest.raises(Exception) as exc_info:
             await verify_token_async(token)
-    assert exc_info.value.status_code == 401
+    assert exc_info.value.status_code == 503
 
 
 @pytest.mark.asyncio
