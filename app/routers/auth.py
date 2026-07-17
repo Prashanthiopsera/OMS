@@ -9,7 +9,7 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.database.postgres import get_db
 from app.models.postgres.auth_models import User
-from app.core.security import create_access_token, verify_password
+from app.core.security import create_access_token, verify_and_upgrade_password
 from app.schemas.auth import LoginRequest, TokenResponse, UserInfo
 
 logger = logging.getLogger(__name__)
@@ -30,12 +30,24 @@ async def login(request: Request, response: Response, payload: LoginRequest, db:
     )
     user = result.scalar_one_or_none()
 
-    if not user or not verify_password(payload.password, user.hashed_password):
+    if user:
+        is_valid, upgraded_hash = verify_and_upgrade_password(payload.password, user.hashed_password)
+    else:
+        is_valid, upgraded_hash = False, None
+
+    if not user or not is_valid:
         logger.warning(f"Failed login attempt for {payload.email} from {client_ip}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
+
+    # Transparent re-hash: if the stored hash used a legacy algorithm
+    # (bcrypt), upgrade it to Argon2id now that we know the plaintext.
+    if upgraded_hash is not None:
+        user.hashed_password = upgraded_hash
+        await db.commit()
+        logger.info(f"Upgraded password hash to Argon2id for {user.email}")
 
     if not user.is_active:
         raise HTTPException(

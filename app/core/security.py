@@ -2,22 +2,41 @@ import uuid as _uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import bcrypt as _bcrypt
 import jwt
 from fastapi import HTTPException, status
+from pwdlib import PasswordHash
+from pwdlib.hashers.argon2 import Argon2Hasher
+from pwdlib.hashers.bcrypt import BcryptHasher
 
 from app.config import settings
 
 ALGORITHM = "HS256"
 _BLOCKLIST_PREFIX = "jwt:blocked:"
 
+# Dual-algorithm password hashing: Argon2id (OWASP-recommended default) is used
+# for all new hashes; BcryptHasher is kept only so verify() can still validate
+# passwords hashed before this migration. New hashes are never bcrypt.
+_password_hash = PasswordHash((Argon2Hasher(), BcryptHasher()))
+
 
 def hash_password(password: str) -> str:
-    return _bcrypt.hashpw(password.encode(), _bcrypt.gensalt()).decode()
+    """Hash a password with Argon2id."""
+    return _password_hash.hash(password)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return _bcrypt.checkpw(plain_password.encode(), hashed_password.encode())
+    """Verify a password against either an Argon2id or a legacy bcrypt hash."""
+    return _password_hash.verify(plain_password, hashed_password)
+
+
+def verify_and_upgrade_password(plain_password: str, hashed_password: str) -> tuple[bool, str | None]:
+    """Verify a password and, if it was stored with a legacy/outdated hasher
+    (bcrypt), return a freshly computed Argon2id hash so the caller can
+    transparently re-hash it (e.g. on successful login). Returns
+    ``(is_valid, new_hash_or_None)`` — ``new_hash`` is None when no upgrade
+    is needed (already Argon2id) or the password was invalid.
+    """
+    return _password_hash.verify_and_update(plain_password, hashed_password)
 
 
 def create_access_token(data: dict[str, Any]) -> str:

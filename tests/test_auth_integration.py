@@ -100,3 +100,51 @@ def test_login_with_wrong_password_rejected(client, test_user):
 def test_unauthenticated_request_rejected(client):
     resp = client.get("/auth/me")
     assert resp.status_code == 401
+
+
+@pytest.mark.integration
+def test_login_transparently_upgrades_legacy_bcrypt_hash(client):
+    """WO-010: a user whose password was hashed with the pre-migration
+    algorithm (bcrypt) must be able to log in, and their stored hash must be
+    silently upgraded to Argon2id on that successful login."""
+    import uuid as _uuid
+    import bcrypt
+    import psycopg2
+    from app.config import settings
+
+    email = f"legacy-hash-test-{_uuid.uuid4().hex[:8]}@oms.local"
+    password = "legacy-bcrypt-password-1234"
+    legacy_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+    conn = psycopg2.connect(settings.SYNC_DATABASE_URL.replace("postgresql+psycopg2", "postgresql"))
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO users (id, email, full_name, hashed_password, is_active, is_superadmin)
+                    VALUES (%s, %s, %s, %s, TRUE, FALSE)
+                    ON CONFLICT (email) DO NOTHING
+                    """,
+                    (str(_uuid.uuid4()), email, "Legacy Hash Test User", legacy_hash),
+                )
+
+        # Sanity check: hash is bcrypt before login
+        with conn.cursor() as cur:
+            cur.execute("SELECT hashed_password FROM users WHERE email = %s", (email,))
+            stored_before = cur.fetchone()[0]
+        assert stored_before.startswith("$2")
+
+        login_resp = client.post("/auth/login", json={"email": email, "password": password})
+        assert login_resp.status_code == 200, login_resp.text
+
+        with conn.cursor() as cur:
+            cur.execute("SELECT hashed_password FROM users WHERE email = %s", (email,))
+            stored_after = cur.fetchone()[0]
+        assert stored_after.startswith("$argon2id$")
+
+        # The upgraded hash must still authenticate the same password.
+        second_login = client.post("/auth/login", json={"email": email, "password": password})
+        assert second_login.status_code == 200
+    finally:
+        conn.close()

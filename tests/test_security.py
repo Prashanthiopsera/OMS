@@ -151,7 +151,7 @@ async def test_revoke_token_adds_jti_to_blocklist():
     assert ttl > 0
 
 
-# ─── Password hashing ───────────────────────────────────────────────────────
+# ─── Password hashing (pwdlib: Argon2id primary, bcrypt legacy-verify) ──────
 
 def test_password_hash_and_verify():
     from app.core.security import hash_password, verify_password
@@ -159,3 +159,45 @@ def test_password_hash_and_verify():
     assert hashed != "correct-horse-battery-staple"
     assert verify_password("correct-horse-battery-staple", hashed) is True
     assert verify_password("wrong-password", hashed) is False
+
+
+def test_new_hashes_use_argon2id():
+    from app.core.security import hash_password
+    hashed = hash_password("correct-horse-battery-staple")
+    assert hashed.startswith("$argon2id$")
+
+
+def test_legacy_bcrypt_hash_still_verifies():
+    """Passwords hashed before the pwdlib migration (raw bcrypt) must keep
+    working so existing users are not locked out."""
+    import bcrypt
+    from app.core.security import verify_password
+    legacy_hash = bcrypt.hashpw(b"legacy-password", bcrypt.gensalt()).decode()
+    assert verify_password("legacy-password", legacy_hash) is True
+    assert verify_password("wrong-password", legacy_hash) is False
+
+
+def test_verify_and_upgrade_password_upgrades_legacy_bcrypt_hash():
+    import bcrypt
+    from app.core.security import verify_and_upgrade_password
+    legacy_hash = bcrypt.hashpw(b"legacy-password", bcrypt.gensalt()).decode()
+    is_valid, new_hash = verify_and_upgrade_password("legacy-password", legacy_hash)
+    assert is_valid is True
+    assert new_hash is not None
+    assert new_hash.startswith("$argon2id$")
+
+
+def test_verify_and_upgrade_password_no_upgrade_for_argon2id():
+    from app.core.security import hash_password, verify_and_upgrade_password
+    hashed = hash_password("correct-horse-battery-staple")
+    is_valid, new_hash = verify_and_upgrade_password("correct-horse-battery-staple", hashed)
+    assert is_valid is True
+    assert new_hash is None
+
+
+def test_verify_and_upgrade_password_rejects_wrong_password():
+    from app.core.security import hash_password, verify_and_upgrade_password
+    hashed = hash_password("correct-horse-battery-staple")
+    is_valid, new_hash = verify_and_upgrade_password("wrong-password", hashed)
+    assert is_valid is False
+    assert new_hash is None
