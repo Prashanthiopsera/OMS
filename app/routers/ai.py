@@ -906,9 +906,326 @@ def _data_kind(tool_name: str, result: dict) -> str | None:
 
 # ─── SSE Streaming Generator ──────────────────────────────────────────────────
 
+async def _stream_openrouter_response(messages: list[dict], api_key: str) -> AsyncGenerator[str, None]:
+    """OpenRouter-based streaming with tool calling (uses OpenAI SDK)."""
+    try:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key,
+            default_headers={
+                "HTTP-Referer": "http://localhost:3002",
+                "X-Title": "OMS AI Assistant"
+            }
+        )
+    except ImportError:
+        yield f"data: {json.dumps({'type': 'error', 'message': 'openai package not installed. Run: pip install openai'})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
+    from datetime import datetime, timezone
+    _now = datetime.now(timezone.utc)
+    _today_str = _now.strftime("%Y-%m-%d")
+    _today_start = f"{_today_str}T00:00:00"
+    _today_end = f"{_today_str}T23:59:59"
+
+    system_prompt = f"""You are an intelligent OMS (Order Management System) assistant. You have live access to order, inventory, and fulfillment data through tools. Always query the data before answering — never guess.
+
+TODAY'S DATE: {_today_str} (UTC). When the user says "today", use start_date="{_today_start}" and end_date="{_today_end}" in search_orders.
+
+Always cite specific numbers from the data. Be concise: state the finding, then add 1-2 lines of expert insight."""
+
+    # Convert tools to OpenAI format
+    openai_tools = []
+    for tool in TOOLS:
+        openai_tools.append({
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["input_schema"]
+            }
+        })
+
+    conversation = [{"role": "system", "content": system_prompt}] + list(messages)
+    max_rounds = 8
+
+    try:
+        for _round in range(max_rounds):
+            response = await client.chat.completions.create(
+                model="cohere/north-mini-code:free",  # Free model on OpenRouter
+                messages=conversation,
+                tools=openai_tools if openai_tools else None,
+                tool_choice="auto" if openai_tools else None,
+                temperature=0.7,
+                max_tokens=4096,
+                stream=True
+            )
+
+            tool_calls = []
+            current_tool_call = None
+            text_buffer = ""
+            finish_reason = None
+
+            async for chunk in response:
+                if not chunk.choices:
+                    continue
+                    
+                choice = chunk.choices[0]
+                delta = choice.delta
+                
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
+
+                # Stream text content
+                if delta.content:
+                    text_buffer += delta.content
+                    yield f"data: {json.dumps({'type': 'text_delta', 'text': delta.content})}\n\n"
+
+                # Handle tool calls
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        if tc_delta.index is not None:
+                            # Start new tool call or update existing
+                            while len(tool_calls) <= tc_delta.index:
+                                tool_calls.append({
+                                    "id": "",
+                                    "name": "",
+                                    "arguments": ""
+                                })
+                            current_tool_call = tool_calls[tc_delta.index]
+                            
+                            if tc_delta.id:
+                                current_tool_call["id"] = tc_delta.id
+                            if tc_delta.function and tc_delta.function.name:
+                                current_tool_call["name"] = tc_delta.function.name
+                                yield f"data: {json.dumps({'type': 'tool_call', 'tool': tc_delta.function.name})}\n\n"
+                            if tc_delta.function and tc_delta.function.arguments:
+                                current_tool_call["arguments"] += tc_delta.function.arguments
+
+            # No tool calls, just text response
+            if not tool_calls or not any(tc.get("name") for tc in tool_calls):
+                break
+
+            # Add assistant message with tool calls
+            assistant_msg = {
+                "role": "assistant",
+                "content": text_buffer or None,
+                "tool_calls": [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": tc["arguments"]
+                        }
+                    }
+                    for tc in tool_calls if tc.get("name")
+                ]
+            }
+            conversation.append(assistant_msg)
+
+            # Execute tools
+            for tc in tool_calls:
+                if not tc.get("name"):
+                    continue
+                try:
+                    args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+                    result = await execute_tool(tc["name"], args)
+                    kind = _data_kind(tc["name"], result)
+                    if kind:
+                        yield f"data: {json.dumps({'type': 'data', 'kind': kind, 'data': result})}\n\n"
+                    
+                    conversation.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": json.dumps(result)
+                    })
+                except Exception as exc:
+                    logger.exception(f"Tool {tc['name']} failed")
+                    conversation.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": json.dumps({"error": "Tool execution failed"})
+                    })
+
+    except Exception as exc:
+        logger.exception("OpenRouter streaming error")
+        yield f"data: {json.dumps({'type': 'error', 'message': 'An error occurred processing your request'})}\n\n"
+
+    yield "data: [DONE]\n\n"
+
+
+async def _stream_groq_response(messages: list[dict], api_key: str) -> AsyncGenerator[str, None]:
+    """Groq-based streaming with tool calling."""
+    try:
+        from groq import AsyncGroq
+        client = AsyncGroq(api_key=api_key)
+    except ImportError:
+        yield f"data: {json.dumps({'type': 'error', 'message': 'groq package not installed. Run: pip install groq'})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
+
+    from datetime import datetime, timezone
+    _now = datetime.now(timezone.utc)
+    _today_str = _now.strftime("%Y-%m-%d")
+    _today_start = f"{_today_str}T00:00:00"
+    _today_end = f"{_today_str}T23:59:59"
+
+    system_prompt = f"""You are an intelligent OMS (Order Management System) assistant. You have live access to order, inventory, and fulfillment data through tools. Always query the data before answering — never guess.
+
+TODAY'S DATE: {_today_str} (UTC). When the user says "today", use start_date="{_today_start}" and end_date="{_today_end}" in search_orders.
+
+Always cite specific numbers from the data. Be concise: state the finding, then add 1-2 lines of expert insight."""
+
+    # Convert tools to OpenAI format
+    groq_tools = []
+    for tool in TOOLS:
+        groq_tools.append({
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["input_schema"]
+            }
+        })
+
+    conversation = [{"role": "system", "content": system_prompt}] + list(messages)
+    max_rounds = 8
+
+    try:
+        for _round in range(max_rounds):
+            response = await client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=conversation,
+                tools=groq_tools if groq_tools else None,
+                tool_choice="auto" if groq_tools else None,
+                temperature=0.7,
+                max_tokens=4096,
+                stream=True
+            )
+
+            tool_calls = []
+            current_tool_call = None
+            text_buffer = ""
+
+            async for chunk in response:
+                if not chunk.choices:
+                    continue
+                    
+                choice = chunk.choices[0]
+                delta = choice.delta
+
+                # Stream text content
+                if delta.content:
+                    text_buffer += delta.content
+                    yield f"data: {json.dumps({'type': 'text_delta', 'text': delta.content})}\n\n"
+
+                # Handle tool calls
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        if tc_delta.index is not None:
+                            # Start new tool call or update existing
+                            while len(tool_calls) <= tc_delta.index:
+                                tool_calls.append({
+                                    "id": "",
+                                    "name": "",
+                                    "arguments": ""
+                                })
+                            current_tool_call = tool_calls[tc_delta.index]
+                            
+                            if tc_delta.id:
+                                current_tool_call["id"] = tc_delta.id
+                            if tc_delta.function and tc_delta.function.name:
+                                current_tool_call["name"] = tc_delta.function.name
+                                yield f"data: {json.dumps({'type': 'tool_call', 'tool': tc_delta.function.name})}\n\n"
+                            if tc_delta.function and tc_delta.function.arguments:
+                                current_tool_call["arguments"] += tc_delta.function.arguments
+
+                # Check if we're done
+                if choice.finish_reason:
+                    break
+
+            # No tool calls, just text response
+            if not tool_calls or not any(tc.get("name") for tc in tool_calls):
+                break
+
+            # Add assistant message with tool calls
+            assistant_msg = {"role": "assistant", "content": text_buffer or None}
+            if tool_calls:
+                assistant_msg["tool_calls"] = [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": tc["arguments"]
+                        }
+                    }
+                    for tc in tool_calls if tc.get("name")
+                ]
+            conversation.append(assistant_msg)
+
+            # Execute tools
+            for tc in tool_calls:
+                if not tc.get("name"):
+                    continue
+                try:
+                    args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+                    result = await execute_tool(tc["name"], args)
+                    kind = _data_kind(tc["name"], result)
+                    if kind:
+                        yield f"data: {json.dumps({'type': 'data', 'kind': kind, 'data': result})}\n\n"
+                    
+                    conversation.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": json.dumps(result)
+                    })
+                except Exception as exc:
+                    logger.exception(f"Tool {tc['name']} failed")
+                    conversation.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": json.dumps({"error": "Tool execution failed"})
+                    })
+
+    except Exception as exc:
+        logger.exception("Groq streaming error")
+        yield f"data: {json.dumps({'type': 'error', 'message': 'An error occurred processing your request'})}\n\n"
+
+    yield "data: [DONE]\n\n"
+
+
 async def _stream_ai_response(messages: list[dict]) -> AsyncGenerator[str, None]:
-    """Agentic loop: stream KubeAI tokens in real-time, execute tools between rounds."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    """Agentic loop: stream AI tokens in real-time, execute tools between rounds."""
+    from app.config import settings
+    
+    # Route to appropriate provider
+    provider = settings.AI_PROVIDER.lower()
+    
+    if provider == "openrouter":
+        api_key = settings.OPENROUTER_API_KEY
+        if not api_key:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'OPENROUTER_API_KEY not configured. Get free key at https://openrouter.ai'})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        async for chunk in _stream_openrouter_response(messages, api_key):
+            yield chunk
+        return
+    
+    if provider == "groq":
+        api_key = settings.GROQ_API_KEY
+        if not api_key:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'GROQ_API_KEY not configured. Set AI_PROVIDER=groq and GROQ_API_KEY in .env'})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        async for chunk in _stream_groq_response(messages, api_key):
+            yield chunk
+        return
+    
+    # Default to Anthropic
+    api_key = settings.ANTHROPIC_API_KEY
     if not api_key:
         yield f"data: {json.dumps({'type': 'error', 'message': 'ANTHROPIC_API_KEY not configured'})}\n\n"
         yield "data: [DONE]\n\n"
@@ -1124,15 +1441,49 @@ async def ai_chat(request: Request, body: ChatRequest, _: dict = Depends(get_cur
 @router.get("/status")
 async def ai_status(_: dict = Depends(require_superadmin)):
     """Check AI configuration status."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    has_key = bool(api_key and len(api_key) > 10)
-    try:
-        import anthropic  # noqa: F401
-        has_package = True
-    except ImportError:
-        has_package = False
-    status_value = "ok" if (has_key and has_package) else "unavailable"
-    return {
-        "status": status_value,
-        "model": "claude-sonnet-4-6",
-    }
+    from app.config import settings
+    
+    provider = settings.AI_PROVIDER.lower()
+    
+    if provider == "openrouter":
+        api_key = settings.OPENROUTER_API_KEY
+        has_key = bool(api_key and len(api_key) > 10)
+        try:
+            import openai  # noqa: F401
+            has_package = True
+        except ImportError:
+            has_package = False
+        status_value = "ok" if (has_key and has_package) else "unavailable"
+        return {
+            "status": status_value,
+            "provider": "openrouter",
+            "model": "cohere/north-mini-code:free",
+        }
+    elif provider == "groq":
+        api_key = settings.GROQ_API_KEY
+        has_key = bool(api_key and len(api_key) > 10)
+        try:
+            import groq  # noqa: F401
+            has_package = True
+        except ImportError:
+            has_package = False
+        status_value = "ok" if (has_key and has_package) else "unavailable"
+        return {
+            "status": status_value,
+            "provider": "groq",
+            "model": "llama-3.3-70b-versatile",
+        }
+    else:
+        api_key = settings.ANTHROPIC_API_KEY
+        has_key = bool(api_key and len(api_key) > 10)
+        try:
+            import anthropic  # noqa: F401
+            has_package = True
+        except ImportError:
+            has_package = False
+        status_value = "ok" if (has_key and has_package) else "unavailable"
+        return {
+            "status": status_value,
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6",
+        }

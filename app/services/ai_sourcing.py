@@ -55,7 +55,8 @@ class AISourcingAdvisor:
     """
 
     def __init__(self):
-        self._api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        from app.config import settings
+        self._api_key = settings.ANTHROPIC_API_KEY
 
     async def score_nodes(
         self,

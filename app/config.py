@@ -98,6 +98,14 @@ class Settings(BaseSettings):
     TEST_API_KEY: str = "dev-test-key"
 
     # ---------------------------------------------------------------------------
+    # AI / LLM
+    # ---------------------------------------------------------------------------
+    AI_PROVIDER: str = "anthropic"  # Options: "anthropic", "groq", "openrouter"
+    ANTHROPIC_API_KEY: str = ""  # Claude API key for AI-powered sourcing
+    GROQ_API_KEY: str = ""  # Groq API key for free AI assistant
+    OPENROUTER_API_KEY: str = ""  # OpenRouter API key (free tier available)
+
+    # ---------------------------------------------------------------------------
     # DigitalOcean Spaces (object storage)
     # ---------------------------------------------------------------------------
     SPACES_BUCKET: str = ""               # e.g. "oms-assets"
