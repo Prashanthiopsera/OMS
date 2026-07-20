@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oms-config
+  namespace: oms-marvell-dev
+data:
+  TENANT_SLUG: "oms-marvell"
+  ENVIRONMENT: "development"
+  PLAN_TIER: "STARTER"
+  DATABASE_URL: "postgresql+asyncpg://oms_user:oms_pass@postgres:5432/oms_db"
+  SYNC_DATABASE_URL: "postgresql+psycopg2://oms_user:oms_pass@postgres:5432/oms_db"
+  MONGODB_URL: "mongodb://mongodb:27017/oms_events"
+  MONGODB_DB: "oms_events"
+  MONGODB_AI_DB: "oms_ai_learning"
+  REDIS_URL: "redis://redis:6379/0"
+  ELASTICSEARCH_URL: "http://elasticsearch:9200"
+  PUBLIC_BASE_URL: "https://oms-marvell-dev.agent.opsera.dev/api"
+  FRONTEND_URL: "https://oms-marvell-dev.agent.opsera.dev"
+  AI_PROVIDER: "openrouter"
+  BOOTSTRAP_ADMIN_EMAIL: "admin@oms.local"

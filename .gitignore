@@ -57,3 +57,4 @@ es_data/
 .pytest_cache/
 htmlcov/
 .coverage
+deploy/kubernetes/secrets.yaml
